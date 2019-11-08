@@ -1,10 +1,11 @@
-// dllmain.cpp : Defines the entry point for the DLL application.
-#include "stdafx.h"
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <intrin.h>
 
 typedef int (__cdecl* Type_InitSubtitleFont)( wchar_t *Str, int, int, int, int, int, int, int, int );
 Type_InitSubtitleFont pInitSubtitleFont;
 
-int __cdecl hkInitSubtitleFont( wchar_t *Str, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8 )
+int __cdecl hkInitSubtitleFont( wchar_t *Str, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8 ) // D3D12
 {
 	int Len = wcslen( Str );
 	
@@ -23,6 +24,30 @@ int __cdecl hkInitSubtitleFont( wchar_t *Str, int a1, int a2, int a3, int a4, in
 	}
 
 	return pInitSubtitleFont( &Str[ SkipIndex ], a1, a2, a3, a4, a5, a6, a7, a8 );
+}
+
+
+typedef int( __cdecl* Type_RenderSubtitleLine )( HDC hdc, wchar_t* Str, int a3, int a4, int a5, int a6, int a7, int a8 );
+Type_RenderSubtitleLine pRenderSubtitleLine;
+
+int __cdecl hkRenderSubtitleLine( HDC hdc, wchar_t* Str, int a3, int a4, int a5, int a6, int a7, int a8 )// GDI
+{
+	int Len = wcslen( Str );
+
+	int SkipIndex = 0;
+
+	for( size_t i = 0, j = 7; i < Len && j > 0; i++ )
+	{
+		if( Str[ i ] == ',' )
+		{
+			if( j < 2 )
+			{
+				SkipIndex = i + 1;
+			}
+			j--;
+		}
+	}
+	return pRenderSubtitleLine( hdc, &Str[ SkipIndex ], a3, a4, a5, a6, a7, a8 );
 }
 
 bool bDataCompare( const BYTE* pData, const BYTE* bMask, const char* szMask )
@@ -48,7 +73,9 @@ void *DetourFunc( BYTE *src, const BYTE *dst, const int len )
 
 	VirtualProtect( src, len, PAGE_READWRITE, &dwback );
 
-	memcpy( jmp, src, len );	jmp += len;
+	__movsb( jmp, src, len );
+	
+	jmp += len;
 
 	jmp[ 0 ] = 0xE9;
 	*( DWORD* ) ( jmp + 1 ) = ( DWORD ) ( src + len - jmp ) - 5;
@@ -98,6 +125,83 @@ DWORD __stdcall dwThread( void* )
 	{
 		MessageBoxA( 0, "Error 4", nullptr, 0 );
 		return 0;
+	}
+	//
+	dwAddress = dwFindPattern( dwStart, dwSize, ( BYTE* ) "\x57\x56\x55\x53\x83\xEC\x4C\x8D\x04\x24\x50\xFF\x35\x00\x00\x00\x00", "xxxxxxxxxxxxx????" );
+
+	if( !dwAddress )
+	{
+		MessageBoxA( 0, "Error 5", nullptr, 0 );
+		return 0;
+	}
+
+	pRenderSubtitleLine = ( Type_RenderSubtitleLine ) DetourFunc( ( BYTE* ) dwAddress, ( BYTE* ) hkRenderSubtitleLine, 0x7 );
+
+	if( !pRenderSubtitleLine )
+	{
+		MessageBoxA( 0, "Error 6", nullptr, 0 );
+		return 0;
+	}
+
+	return 1;
+}
+
+extern "C" BOOL __declspec( dllexport ) __stdcall EnumProcesses( DWORD *lpidProcess, DWORD cb, LPDWORD lpcbNeeded )
+{
+	PROCESSENTRY32 pe32;
+	HANDLE hProcessSnap = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
+
+	if( hProcessSnap == INVALID_HANDLE_VALUE )
+		return FALSE;
+
+	pe32.dwSize = sizeof( PROCESSENTRY32 );
+
+	DWORD dwNeeded;
+
+	if( lpcbNeeded == nullptr )
+	{
+		lpcbNeeded = &dwNeeded;
+	}
+
+	*lpcbNeeded = 0;
+
+
+	if( Process32First( hProcessSnap, &pe32 ) )
+	{
+		do
+		{
+			if( lpidProcess )
+				lpidProcess[ *lpcbNeeded ] = pe32.th32ProcessID;
+
+			*lpcbNeeded++;
+		}
+		while( cb / sizeof( DWORD ) > *lpcbNeeded );
+	}
+
+	return *lpcbNeeded > 0;
+}
+
+extern "C" DWORD __declspec( dllexport ) __stdcall GetModuleBaseNameW( HANDLE hProcess, HMODULE hModule, LPWSTR lpBaseName, DWORD nSize )
+{
+	MODULEENTRY32 me32;
+
+	HANDLE hProcessSnap = CreateToolhelp32Snapshot( TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetProcessId( hProcess ) );
+
+	if( hProcessSnap == INVALID_HANDLE_VALUE )
+		return 0;
+
+	me32.dwSize = sizeof( MODULEENTRY32 );
+
+	if( Module32First( hProcessSnap, &me32 ) )
+	{
+		do
+		{
+			if( me32.hModule == hModule || me32.modBaseAddr == ( BYTE* ) hModule )
+			{
+				lstrcpyW( lpBaseName, me32.szModule );
+			}
+		}
+		while( Module32Next( hProcessSnap, &me32 ) );
 	}
 
 	return 0;
